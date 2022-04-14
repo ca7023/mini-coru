@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <ucontext.h>
+#include <time.h>
 #define mc_yield()                                                             \
   do {                                                                         \
     mc_wait(mc_current_mc);                                                    \
@@ -27,7 +28,7 @@
 #define MC_IOURING_QUEUE_DEPTH 32
 
 typedef struct minicoru_t {
-  enum { MC_TYPE_MANAGER, MC_TYPE_WORKER } type;
+  enum { MC_TYPE_MANAGER, MC_TYPE_WORKER, MC_TYPE_TIMER } type;
   unsigned int id;
   ucontext_t ctx;
   char stack[MC_STKSIZ];
@@ -43,6 +44,7 @@ typedef struct minicoru_t {
     void **with_msg;         // with what
   } notify;
   void *result;
+  timer_t timer;
 } minicoru_t;
 
 enum mc_core_state { MC_UNINT, MC_READY, MC_RUNNING };
@@ -64,3 +66,5 @@ void mc_run();
 
 int mc_read(int fd, void const *buf, size_t len);
 int mc_write(int fd, void const *buf, size_t len);
+
+minicoru_t * mc_async_timed_wait(struct timespec oneshot);

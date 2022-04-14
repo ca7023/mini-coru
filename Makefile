@@ -5,7 +5,7 @@ TEST_SRCS := $(wildcard test/*.c)
 OBJS := $(SRCS:%.c=${OUTPUT}/%.o)
 TEST_EXES := $(TEST_SRCS:%.c=${OUTPUT}/%)
 CFLAGS ?=
-CFLAGS += -g -Wall -fstack-protector-all -Wstack-protector -fno-omit-frame-pointer -O0
+CFLAGS += -g -Wall -lrt -O0
 SONAME := libminicoru.so
 
 all: test

@@ -1,5 +1,7 @@
+#include <signal.h>
 #include <stdint.h>
 #include <sys/ucontext.h>
+#include <time.h>
 #ifdef DEBUG
 #include <stdio.h>
 #endif
@@ -7,6 +9,8 @@
 #include "minicoru.h"
 
 #define MC_MAX_N_MC 1 << 9
+#define MC_TIMER_CLOCK_ID CLOCK_REALTIME
+#define MC_TIMER_SIG SIGRTMIN
 
 #define likely(x) __builtin_expect ((x), 1)
 #define unlikely(x) __builtin_expect ((x), 0)
@@ -86,13 +90,13 @@ q_is_empty (queue_t const *q)
 static inline __attribute__ ((always_inline)) void
 assert (int cond, const char *msg)
 {
-#ifdef DEBUG
   if (unlikely (!cond))
     {
+#ifdef DEBUG
       puts (msg);
+#endif
       abort ();
     }
-#endif
 }
 
 void
@@ -159,8 +163,13 @@ mc_wait (minicoru_t *mc)
     {
       abort ();
     }
-  q_push (mc_waiters, mc);
-  mc->state = MC_STATE_WAITING;
+  if (mc->state == MC_STATE_RUNNING)
+    {
+      q_push (mc_waiters, mc);
+      mc->state = MC_STATE_WAITING;
+      return;
+    }
+  LOG_DEBUG ("#%u in illegal state %d called wait\n", mc->id, mc->state);
 }
 
 void
@@ -185,6 +194,13 @@ mc_fin (minicoru_t *mc, void *ret)
     mc_notify (mc);
 }
 
+static inline __attribute__ ((always_inline)) void
+mc_suspend (minicoru_t *t)
+{
+  t->state = MC_STATE_SUSPENDING;
+  ++mc_n_suspending;
+}
+
 minicoru_t *
 mc_new ()
 {
@@ -206,7 +222,8 @@ mc_new ()
   t->ctx.uc_stack.ss_sp = t->stack;
   t->ctx.uc_stack.ss_size = MC_STKSIZ;
   t->ctx.uc_link = NULL;
-  t->state = MC_STATE_SUSPENDING;
+  t->timer = 0;
+  mc_suspend (t);
   return t;
 }
 
@@ -240,14 +257,16 @@ scheduler ()
     {
 #ifdef DEBUG
       ++mc_stat_n_coru_freed;
-      LOG_DEBUG (PURPLE "#%d fin: - %u/%u freed/created\n" RESET,
+      LOG_DEBUG (PURPLE "#%d fin: - %u/%u freed/created %d suspending\n" RESET,
                  mc_current_mc->id, mc_stat_n_coru_freed,
-                 mc_stat_n_coru_created);
+                 mc_stat_n_coru_created, mc_n_suspending);
 #endif
       if (mc_current_mc->notify.coru)
         mc_arrange (mc_current_mc->notify.coru);
       if (mc_current_mc->notify.with_msg)
         *mc_current_mc->notify.with_msg = mc_current_mc->result;
+      if (unlikely (mc_current_mc->type == MC_TYPE_TIMER))
+        timer_delete (mc_current_mc->timer); // no need to check return value
       free (mc_current_mc);
       mc_current_mc = NULL;
     }
@@ -294,6 +313,7 @@ mc_arrange (minicoru_t *t)
 {
   if (t->state == MC_STATE_SUSPENDING)
     {
+      --mc_n_suspending;
       t->state = MC_STATE_WAITING;
       q_push (mc_waiters, t);
       LOG_DEBUG ("arraged #%u\n", t->id);
@@ -317,30 +337,11 @@ mc_await (minicoru_t *t)
   void *slot = NULL;
   t->notify.coru = mc_current_mc;
   t->notify.with_msg = &slot;
-  mc_arrange (t);
-  mc_current_mc->state = MC_STATE_SUSPENDING;
-  do
-    {
-      mc_schedule ();
-    }
-  while (!slot);
+  if (likely (t->type != MC_TYPE_TIMER))
+    mc_arrange (t);
+  mc_suspend (mc_current_mc);
+  mc_schedule ();
   return slot;
-}
-
-void mc_setup_uring ();
-
-void
-mc_init ()
-{
-  mc_waiters = q_new (MC_MAX_N_MC);
-
-  mc_scheduler = mc_new ();
-  mc_scheduler->type = MC_TYPE_MANAGER;
-  mc_scheduler->state = MC_STATE_WAITING;
-  makecontext (&mc_scheduler->ctx, (void (*) (void))scheduler, 0);
-
-  mc_setup_uring ();
-  MC_STATE = MC_READY;
 }
 
 #include <linux/io_uring.h>
@@ -453,7 +454,6 @@ mc_uring_cq_read ()
 
   assert (mc && mc->state == MC_STATE_SUSPENDING,
           "Illegal state: coru must be suspending");
-  --mc_n_suspending;
   mc->result = (void *)(long)cqe->res;
   mc_arrange (mc);
   head++;
@@ -494,8 +494,7 @@ mc_uring_make_sqe_slot ()
           LOG_DEBUG (RED "failed to submit sqe\n" RESET);                     \
           mc_return (-1);                                                     \
         }                                                                     \
-      mc_current_mc->state = MC_STATE_SUSPENDING;                             \
-      ++mc_n_suspending;                                                      \
+      mc_suspend (mc_current_mc);                                             \
       mc_schedule ();                                                         \
       mc_current_mc->state = MC_STATE_FIN;                                    \
       mc_notify (mc_current_mc);                                              \
@@ -526,6 +525,122 @@ mc_read (int fd, void const *buf, size_t len)
     sqe->off = 0;
   }));
   return 0;
+}
+
+void
+mc_timed_wait ()
+{
+  if (unlikely (mc_current_mc->notify.coru == NULL))
+    {
+      // this should not happen
+      LOG_DEBUG ("timed wait mc is early scheduled");
+      abort ();
+    }
+  mc_fin (mc_current_mc, 0);
+}
+minicoru_t *
+mc_async_timed_wait (struct timespec oneshot)
+{
+  minicoru_t *coru = mc_new_user_mc ();
+  makecontext (&coru->ctx, mc_timed_wait, 0);
+  coru->type = MC_TYPE_TIMER;
+
+  struct sigevent sev;
+  sev.sigev_notify = SIGEV_SIGNAL;
+  sev.sigev_signo = MC_TIMER_SIG;
+  sev.sigev_value.sival_ptr = coru;
+  if (unlikely (timer_create (MC_TIMER_CLOCK_ID, &sev, &coru->timer) == -1))
+    {
+      LOG_DEBUG ("failed to create timer");
+      return NULL;
+    }
+  struct itimerspec its;
+  its.it_value = oneshot;
+  its.it_interval = ((struct timespec){ 0 });
+
+  sigset_t sig_mask;
+  sigemptyset (&sig_mask);
+  sigaddset (&sig_mask, MC_TIMER_SIG);
+  if (unlikely (sigprocmask (SIG_SETMASK, &sig_mask, NULL) == -1))
+    {
+      LOG_DEBUG ("failed to block signals");
+      timer_delete (coru->timer);
+      free (coru);
+      return NULL;
+    }
+
+  if ((timer_settime (coru->timer, 0, &its, NULL)) == -1)
+    {
+      LOG_DEBUG ("failed to arm timer");
+      timer_delete (coru->timer);
+      free (coru);
+      return NULL;
+    }
+
+  if (unlikely (sigprocmask (SIG_UNBLOCK, &sig_mask, NULL) == -1))
+    {
+      LOG_DEBUG ("failed to unblock signals");
+      timer_delete (coru->timer);
+      free (coru);
+      return NULL;
+    }
+  return coru;
+}
+
+void
+mc_timer_signal_handler (int sig, siginfo_t *si, void *uc)
+{
+  sigset_t sig_mask;
+  sigemptyset (&sig_mask);
+  sigaddset (&sig_mask, MC_TIMER_SIG);
+  if (unlikely (sigprocmask (SIG_SETMASK, &sig_mask, NULL) == -1))
+    {
+      LOG_DEBUG ("failed to block signals");
+      abort ();
+    }
+
+  minicoru_t *coru = si->si_value.sival_ptr;
+  LOG_DEBUG ("timer signal arrived for #%u\n", coru->id);
+  mc_arrange (coru);
+
+  if (unlikely (sigprocmask (SIG_UNBLOCK, &sig_mask, NULL) == -1))
+    {
+      LOG_DEBUG ("failed to unblock signals");
+      abort ();
+    }
+}
+
+void
+mc_setup_timer_signal_handler ()
+{
+  struct sigaction sa;
+  sa.sa_flags = SA_SIGINFO;
+  sa.sa_sigaction = mc_timer_signal_handler;
+  sigemptyset (&sa.sa_mask);
+
+  if (sigaction (MC_TIMER_SIG, &sa, NULL) == -1)
+    {
+      LOG_DEBUG ("failed to set signal handler");
+      abort ();
+    }
+}
+
+void
+mc_init ()
+{
+  mc_waiters = q_new (MC_MAX_N_MC);
+
+  mc_scheduler = mc_new ();
+  mc_scheduler->type = MC_TYPE_MANAGER;
+
+  mc_scheduler->state = MC_STATE_WAITING;
+  --mc_n_suspending; // we don't schedule schedular, so it is exempted
+
+  makecontext (&mc_scheduler->ctx, (void (*) (void))scheduler, 0);
+
+  mc_setup_uring ();
+  mc_setup_timer_signal_handler ();
+  MC_STATE = MC_READY;
 }
 
 void
