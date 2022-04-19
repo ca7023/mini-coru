@@ -3,7 +3,7 @@ TEST_SUBDIR := test
 SRCS := $(wildcard *.c)
 TEST_SRCS := $(wildcard test/*.c)
 OBJS := $(SRCS:%.c=${OUTPUT}/%.o)
-TEST_EXES := $(TEST_SRCS:%.c=${OUTPUT}/%)
+TEST_EXES := $(TEST_SRCS:%.c=%)
 CFLAGS ?=
 CFLAGS += -g -Wall -lrt -O0
 SONAME := libminicoru.so
@@ -19,7 +19,7 @@ build: ${OBJS} | outputdir
 test: build $(TEST_EXES)
 
 $(TEST_EXES): $(TEST_SRCS) | outputdir
-	gcc $(CFLAGS) -o $@ $(OUTPUT)/$(SONAME) $<
+	gcc $(CFLAGS) -o $(OUTPUT)/$@ $(OUTPUT)/$(SONAME) $@.c
 
 $(OBJS): $(SRCS) | outputdir
 	gcc $(CFLAGS) -o $@ -fPIC -c $<

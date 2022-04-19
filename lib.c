@@ -2,13 +2,14 @@
 #include <stdint.h>
 #include <sys/ucontext.h>
 #include <time.h>
+#include <ucontext.h>
 #ifdef DEBUG
 #include <stdio.h>
 #endif
 
 #include "minicoru.h"
 
-#define MC_MAX_N_MC 1 << 9
+#define MC_MAX_N_MC 1 << 11
 #define MC_TIMER_CLOCK_ID CLOCK_REALTIME
 #define MC_TIMER_SIG SIGRTMIN
 
@@ -302,6 +303,7 @@ scheduler ()
       free (mc_scheduler);
       return;
     }
+
   mc_scheduler->state = MC_STATE_WAITING;
   mc_resume (next);
   // UNREACHABLE
@@ -636,8 +638,6 @@ mc_init ()
   mc_scheduler->state = MC_STATE_WAITING;
   --mc_n_suspending; // we don't schedule schedular, so it is exempted
 
-  makecontext (&mc_scheduler->ctx, (void (*) (void))scheduler, 0);
-
   mc_setup_uring ();
   mc_setup_timer_signal_handler ();
   MC_STATE = MC_READY;
@@ -648,7 +648,24 @@ mc_run ()
 {
   if (MC_STATE != MC_READY)
     abort ();
+
+  ucontext_t orig;
+  if (getcontext (&orig) < 0)
+    {
+#ifdef DEBUG
+      perror ("getcontext");
+#endif
+      abort ();
+    }
+  mc_scheduler->ctx.uc_link = &orig;
+  makecontext (&mc_scheduler->ctx, (void (*) (void))scheduler, 0);
   MC_STATE = MC_RUNNING;
-  setcontext (&mc_scheduler->ctx);
-  abort (); // cannot reach here.
+  swapcontext (&orig, &mc_scheduler->ctx);
+#ifdef DEBUG
+  if (mc_stat_n_coru_created != mc_stat_n_coru_freed)
+    {
+      LOG_DEBUG (RED "POSSIBLE LEAK DETECTED: created %d but freed %d\n" RESET,
+                 mc_stat_n_coru_created, mc_stat_n_coru_freed);
+    }
+#endif
 }
