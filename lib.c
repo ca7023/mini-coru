@@ -630,6 +630,8 @@ mc_setup_timer_signal_handler ()
 void
 mc_init ()
 {
+  LOG_DEBUG("sizeof(struct minicoru_t) == %lu\nremainer on 4K(page size) == %lu (this should not be 0, as avoiding cache thrashing)\n",
+            sizeof(struct minicoru_t), (4 << 10) % ((sizeof(struct minicoru_t)) % (4 << 10)));
   mc_waiters = q_new (MC_MAX_N_MC);
 
   mc_scheduler = mc_new ();

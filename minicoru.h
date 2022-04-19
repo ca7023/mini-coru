@@ -58,6 +58,8 @@ typedef struct minicoru_t
   } notify;
   void *result;
   timer_t timer;
+  uintmax_t _cache_padding; // avoiding cache thrashing, check it when this
+                            // struct get changed
 } minicoru_t;
 
 enum mc_core_state
