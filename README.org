@@ -1,0 +1,23 @@
+* Mini coru
+
+A *naive* lightweight coroutine library in C with some basic sub-optimal component you might want to see in a coroutine library, e.g. timer, basic async I/O facilities (based on =io_uring=).
+
+** Try it?
+
+Clone it, make it, then run some demo in =out/test/*=.
+
+** Road map
+
+If you find this is interesting (really?) and willing to invest some time, consider this targets:
+
+- [ ] A more appropriate data structure implementation for managing waiting coroutines =mc_waiters= , instead of array-based, fixed-sized, error-prone =queue_t=. Consider intrusive linked-list like what Linux kernel do for =wait_queue_head=.
+
+- [ ] One coroutine can only notify another one, a mechanism like =notify_all= might be useful. This might be very easy to implement after we have a better data structure to manage coroutine (see above).
+
+- [ ] Some =select_n=-like coroutine might be useful for condition that you want only await ~n~ coroutines in a large number of coroutines.
+
+- [ ] Timers are currently handled by real time signals which is nice to set us free to manage all timers, but what if the pending queue overflows?
+
+- [ ] What if our coroutine make a segment overflow? Some protection like canary might be useful.
+
+- [ ] A thread-pool for our =scheduler=? (gah!)
