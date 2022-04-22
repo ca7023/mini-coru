@@ -592,24 +592,10 @@ mc_async_timed_wait (struct timespec oneshot)
 void
 mc_timer_signal_handler (int sig, siginfo_t *si, void *uc)
 {
-  sigset_t sig_mask;
-  sigemptyset (&sig_mask);
-  sigaddset (&sig_mask, MC_TIMER_SIG);
-  if (unlikely (sigprocmask (SIG_SETMASK, &sig_mask, NULL) == -1))
-    {
-      LOG_DEBUG ("failed to block signals");
-      abort ();
-    }
-
   minicoru_t *coru = si->si_value.sival_ptr;
+  // this is not signal-safe, but useful for debug
   LOG_DEBUG ("timer signal arrived for #%u\n", coru->id);
   mc_arrange (coru);
-
-  if (unlikely (sigprocmask (SIG_UNBLOCK, &sig_mask, NULL) == -1))
-    {
-      LOG_DEBUG ("failed to unblock signals");
-      abort ();
-    }
 }
 
 void
